@@ -18,6 +18,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             SubCommand::with_name("serve")
                 .about("serve an echo server")
                 .arg(
+                    Arg::with_name("mtu")
+                        .long("mtu")
+                        .required(false)
+                        .takes_value(true)
+                        .help("Fragment mtu."),
+                )
+                .arg(
                     Arg::with_name("URL")
                         .required(true)
                         .index(1)
@@ -36,6 +43,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                         .help("Input payload data."),
                 )
                 .arg(
+                    Arg::with_name("mtu")
+                        .long("mtu")
+                        .required(false)
+                        .takes_value(true)
+                        .help("Fragment mtu."),
+                )
+                .arg(
                     Arg::with_name("URL")
                         .required(true)
                         .index(1)
@@ -52,8 +66,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     match cli.subcommand() {
         ("serve", Some(flags)) => {
             let addr = flags.value_of("URL").expect("Missing URL");
+            let mtu: usize = flags
+                .value_of("mtu")
+                .map(|it| it.parse().expect("Invalid mtu string!"))
+                .unwrap_or(0);
             RSocketFactory::receive()
                 .transport(TcpServerTransport::from(addr))
+                .fragment(mtu)
                 .acceptor(|setup, _socket| {
                     info!("accept setup: {:?}", setup);
                     Ok(Box::new(EchoRSocket))
@@ -65,8 +84,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 .await
         }
         ("connect", Some(flags)) => {
+            let mtu: usize = flags
+                .value_of("mtu")
+                .map(|it| it.parse().expect("Invalid mtu string!"))
+                .unwrap_or(0);
             let addr = flags.value_of("URL").expect("Missing URL");
             let cli = RSocketFactory::connect()
+                .fragment(mtu)
                 .transport(TcpClientTransport::from(addr))
                 .start()
                 .await

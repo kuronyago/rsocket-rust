@@ -82,6 +82,17 @@ impl Payload {
             .map(|raw| String::from_utf8(raw.to_vec()).unwrap())
     }
 
+    pub fn len(&self) -> usize {
+        let mut n = 0;
+        if let Some(it) = &self.m {
+            n += it.len();
+        }
+        if let Some(it) = &self.d {
+            n += it.len();
+        }
+        n
+    }
+
     pub fn split(self) -> (Option<Bytes>, Option<Bytes>) {
         (self.d, self.m)
     }
