@@ -82,6 +82,10 @@ impl Payload {
             .map(|raw| String::from_utf8(raw.to_vec()).unwrap())
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn len(&self) -> usize {
         let mut n = 0;
         if let Some(it) = &self.m {

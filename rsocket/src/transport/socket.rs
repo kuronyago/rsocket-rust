@@ -147,7 +147,7 @@ where
                 }
                 Body::RequestFNF(v) => {
                     let input = Payload::from(v);
-                    self.on_fire_and_forget(sid, flag, input).await;
+                    self.on_fire_and_forget(sid, input).await;
                 }
                 Body::RequestResponse(v) => {
                     let input = Payload::from(v);
@@ -287,7 +287,7 @@ where
     }
 
     #[inline]
-    async fn on_fire_and_forget(&self, sid: u32, flag: u16, input: Payload) {
+    async fn on_fire_and_forget(&self, sid: u32, input: Payload) {
         self.responder.clone().fire_and_forget(input).await
     }
 
@@ -296,11 +296,10 @@ where
         let responder = self.responder.clone();
         let canceller = self.canceller.clone();
         let tx = self.tx.clone();
-
+        let splitter = self.splitter.clone();
         let counter = Counter::new(2);
         self.register_handler(sid, Handler::ResRR(counter.clone()))
             .await;
-
         self.rt.spawn(async move {
             // TODO: use future select
             let result = responder.request_response(input).await;
@@ -314,27 +313,26 @@ where
                 .unbounded_send(sid)
                 .expect("Send canceller failed");
 
-            let sending = match result {
-                Ok(it) => {
-                    let (d, m) = it.split();
-                    let mut bu =
-                        frame::Payload::builder(sid, frame::FLAG_NEXT | frame::FLAG_COMPLETE);
-                    if let Some(b) = d {
-                        bu = bu.set_data(b);
-                    }
-                    if let Some(b) = m {
-                        bu = bu.set_metadata(b);
-                    }
-                    bu.build()
+            match result {
+                Ok(res) => {
+                    Self::try_send_payload(
+                        &splitter,
+                        &tx,
+                        sid,
+                        res,
+                        frame::FLAG_NEXT | frame::FLAG_COMPLETE,
+                    );
                 }
-                Err(e) => frame::Error::builder(sid, 0)
-                    .set_code(error::ERR_APPLICATION)
-                    .set_data(Bytes::from("TODO: should be error details"))
-                    .build(),
+                Err(e) => {
+                    let sending = frame::Error::builder(sid, 0)
+                        .set_code(error::ERR_APPLICATION)
+                        .set_data(Bytes::from("TODO: should be error details"))
+                        .build();
+                    if let Err(e) = tx.unbounded_send(sending) {
+                        error!("respond REQUEST_RESPONSE failed: {}", e);
+                    }
+                }
             };
-            if let Err(e) = tx.unbounded_send(sending) {
-                error!("respond REQUEST_RESPONSE failed: {}", e);
-            }
         });
     }
 
@@ -342,29 +340,24 @@ where
     async fn on_request_stream(&self, sid: u32, flag: u16, input: Payload) {
         let responder = self.responder.clone();
         let tx = self.tx.clone();
+        let splitter = self.splitter.clone();
         self.rt.spawn(async move {
             // TODO: support cancel
             let mut payloads = responder.request_stream(input);
             while let Some(next) = payloads.next().await {
-                let sending = match next {
+                match next {
                     Ok(it) => {
-                        let (d, m) = it.split();
-                        let mut bu = frame::Payload::builder(sid, frame::FLAG_NEXT);
-                        if let Some(b) = d {
-                            bu = bu.set_data(b);
-                        }
-                        if let Some(b) = m {
-                            bu = bu.set_metadata(b);
-                        }
-                        bu.build()
+                        Self::try_send_payload(&splitter, &tx, sid, it, frame::FLAG_NEXT);
                     }
-                    Err(e) => frame::Error::builder(sid, 0)
-                        .set_code(error::ERR_APPLICATION)
-                        .set_data(Bytes::from(format!("{}", e)))
-                        .build(),
+                    Err(e) => {
+                        let sending = frame::Error::builder(sid, 0)
+                            .set_code(error::ERR_APPLICATION)
+                            .set_data(Bytes::from(format!("{}", e)))
+                            .build();
+                        tx.unbounded_send(sending)
+                            .expect("Send stream response failed");
+                    }
                 };
-                tx.unbounded_send(sending)
-                    .expect("Send stream response failed");
             }
             let complete = frame::Payload::builder(sid, frame::FLAG_COMPLETE).build();
             tx.unbounded_send(complete)
@@ -431,6 +424,62 @@ where
         }
         if let Err(e) = tx.unbounded_send(sending.build()) {
             error!("respond KEEPALIVE failed: {}", e);
+        }
+    }
+
+    #[inline]
+    fn try_send_payload(
+        splitter: &Option<Splitter>,
+        tx: &Tx<Frame>,
+        sid: u32,
+        res: Payload,
+        flag: u16,
+    ) {
+        match splitter {
+            Some(sp) => {
+                let mut cuts: usize = 0;
+                let mut prev: Option<Payload> = None;
+                for next in sp.cut(res, 0) {
+                    if let Some(cur) = prev.take() {
+                        let sending = if cuts == 1 {
+                            frame::Payload::builder(sid, flag | frame::FLAG_FOLLOW)
+                                .set_all(cur.split())
+                                .build()
+                        } else {
+                            frame::Payload::builder(sid, frame::FLAG_FOLLOW)
+                                .set_all(cur.split())
+                                .build()
+                        };
+                        // send frame
+                        if let Err(e) = tx.unbounded_send(sending) {
+                            error!("send payload failed: {}", e);
+                            return;
+                        }
+                    }
+                    prev = Some(next);
+                    cuts += 1;
+                }
+
+                let sending = if cuts == 0 {
+                    frame::Payload::builder(sid, flag).build()
+                } else {
+                    frame::Payload::builder(sid, flag)
+                        .set_all(prev.unwrap().split())
+                        .build()
+                };
+                // send frame
+                if let Err(e) = tx.unbounded_send(sending) {
+                    error!("send payload failed: {}", e);
+                }
+            }
+            None => {
+                let sending = frame::Payload::builder(sid, flag)
+                    .set_all(res.split())
+                    .build();
+                if let Err(e) = tx.unbounded_send(sending) {
+                    error!("respond failed: {}", e);
+                }
+            }
         }
     }
 }

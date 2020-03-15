@@ -95,15 +95,15 @@ impl Into<Payload> for Joiner {
             }
         });
 
-        let data = if bf.len() > 0 {
+        let data = if bf.is_empty() {
+            None
+        } else {
             Some(bf.freeze())
-        } else {
-            None
         };
-        let metadata = if bf2.len() > 0 {
-            Some(bf2.freeze())
-        } else {
+        let metadata = if bf2.is_empty() {
             None
+        } else {
+            Some(bf2.freeze())
         };
         Payload::new(data, metadata)
     }
@@ -129,7 +129,7 @@ impl Joiner {
     }
 
     pub(crate) fn first(&self) -> &Frame {
-        return self.inner.front().unwrap();
+        self.inner.front().unwrap()
     }
 
     pub(crate) fn push(&mut self, next: Frame) -> bool {
