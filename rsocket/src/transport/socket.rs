@@ -428,6 +428,67 @@ where
     }
 
     #[inline]
+    fn try_send_channel(
+        splitter: &Option<Splitter>,
+        tx: &Tx<Frame>,
+        sid: u32,
+        res: Payload,
+        flag: u16,
+    ) {
+        // TODO
+        match splitter {
+            Some(sp) => {
+                let mut cuts: usize = 0;
+                let mut prev: Option<Payload> = None;
+                for next in sp.cut(res, 4) {
+                    if let Some(cur) = prev.take() {
+                        let sending = if cuts == 1 {
+                            frame::RequestChannel::builder(sid, flag | frame::FLAG_FOLLOW)
+                                .set_all(cur.split())
+                                .build()
+                        } else {
+                            frame::Payload::builder(sid, frame::FLAG_FOLLOW)
+                                .set_all(cur.split())
+                                .build()
+                        };
+                        // send frame
+                        if let Err(e) = tx.unbounded_send(sending) {
+                            error!("send request_channel failed: {}", e);
+                            return;
+                        }
+                    }
+                    prev = Some(next);
+                    cuts += 1;
+                }
+
+                let sending = if cuts == 0 {
+                    frame::RequestChannel::builder(sid, flag).build()
+                } else if cuts == 1 {
+                    frame::RequestChannel::builder(sid, flag)
+                        .set_all(prev.unwrap().split())
+                        .build()
+                } else {
+                    frame::Payload::builder(sid, 0)
+                        .set_all(prev.unwrap().split())
+                        .build()
+                };
+                // send frame
+                if let Err(e) = tx.unbounded_send(sending) {
+                    error!("send request_channel failed: {}", e);
+                }
+            }
+            None => {
+                let sending = frame::RequestChannel::builder(sid, flag)
+                    .set_all(res.split())
+                    .build();
+                if let Err(e) = tx.unbounded_send(sending) {
+                    error!("send request_channel failed: {}", e);
+                }
+            }
+        }
+    }
+
+    #[inline]
     fn try_send_payload(
         splitter: &Option<Splitter>,
         tx: &Tx<Frame>,
@@ -718,6 +779,7 @@ where
         // register handler
         let (sender, receiver) = new_tx_rx::<Result<Payload, RSocketError>>();
         let handlers = Arc::clone(&self.handlers);
+        let splitter = self.splitter.clone();
         self.rt.spawn(async move {
             {
                 let mut map = handlers.lock().await;
@@ -725,38 +787,25 @@ where
             }
             let mut first = true;
             while let Some(next) = reqs.next().await {
-                let sending = match next {
+                match next {
                     Ok(it) => {
-                        let (d, m) = it.split();
                         if first {
                             first = false;
-                            let mut bu = frame::RequestChannel::builder(sid, frame::FLAG_NEXT);
-                            if let Some(b) = d {
-                                bu = bu.set_data(b);
-                            }
-                            if let Some(b) = m {
-                                bu = bu.set_metadata(b);
-                            }
-                            bu.build()
+                            Self::try_send_channel(&splitter, &tx, sid, it, frame::FLAG_NEXT)
                         } else {
-                            let mut bu = frame::Payload::builder(sid, frame::FLAG_NEXT);
-                            if let Some(b) = d {
-                                bu = bu.set_data(b);
-                            }
-                            if let Some(b) = m {
-                                bu = bu.set_metadata(b);
-                            }
-                            bu.build()
+                            Self::try_send_payload(&splitter, &tx, sid, it, frame::FLAG_NEXT)
                         }
                     }
-                    Err(e) => frame::Error::builder(sid, 0)
-                        .set_code(error::ERR_APPLICATION)
-                        .set_data(Bytes::from(format!("{}", e)))
-                        .build(),
+                    Err(e) => {
+                        let sending = frame::Error::builder(sid, 0)
+                            .set_code(error::ERR_APPLICATION)
+                            .set_data(Bytes::from(format!("{}", e)))
+                            .build();
+                        if let Err(e) = tx.unbounded_send(sending) {
+                            error!("send REQUEST_CHANNEL failed: {}", e);
+                        }
+                    }
                 };
-                if let Err(e) = tx.unbounded_send(sending) {
-                    error!("send REQUEST_CHANNEL failed: {}", e);
-                }
             }
             let sending = frame::Payload::builder(sid, frame::FLAG_COMPLETE).build();
             if let Err(e) = tx.unbounded_send(sending) {
