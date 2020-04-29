@@ -91,6 +91,16 @@ impl JsClient {
             Ok(JsValue::NULL)
         })
     }
+
+    pub fn metadata_push(&self, request: &JsValue) -> Promise {
+        let inner = self.inner.clone();
+        let request: JsPayload = request.into_serde().unwrap();
+
+        future_to_promise(async move {
+            inner.metadata_push(request.into()).await;
+            Ok(JsValue::NULL)
+        })
+    }
 }
 
 #[inline]
